@@ -1,0 +1,35 @@
+# Build artifacts
+.build/
+.swiftpm/
+DerivedData/
+Package.resolved
+
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+
+# Packaged app (use Releases instead)
+*.app/
+*.dmg
+*.zip
+
+# Generated icons
+*.icns
+*.iconset/
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*~
+
+# Claude Code local settings
+.claude/
