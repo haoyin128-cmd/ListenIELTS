@@ -41,6 +41,10 @@ struct MainWindowView: View {
         .onAppear {
             setupTrackFinishedCallback()
             playlist.loadSavedTracks()
+            // 如果开启了"启动恢复列表"且成功加载了曲目，则进一步恢复播放进度
+            if !playlist.tracks.isEmpty && player.currentTrack == nil {
+                restoreProgressOrDefault()
+            }
             // 应用退出前保存进度
             NotificationCenter.default.addObserver(
                 forName: NSApplication.willTerminateNotification,
@@ -86,15 +90,10 @@ struct MainWindowView: View {
                 }
                 .help("添加文件")
 
-                Button(action: {
-                    let wasEmpty = playlist.tracks.isEmpty
-                    if playlist.showOpenFolderPanel() > 0 && wasEmpty {
-                        restoreProgressOrDefault()
-                    }
-                }) {
+                Button(action: { openFolder() }) {
                     Image(systemName: "folder.badge.plus")
                 }
-                .help("添加文件夹")
+                .help("打开文件夹（替换当前列表）")
 
                 if !playlist.tracks.isEmpty {
                     // 排序菜单（带当前选中标记）
@@ -186,11 +185,7 @@ struct MainWindowView: View {
             Text("点击按钮或拖拽文件添加").font(.caption).foregroundColor(.secondary)
             HStack(spacing: 12) {
                 Button("添加文件") { playlist.showOpenFilePanel() }.buttonStyle(.borderedProminent)
-                Button("添加文件夹") {
-                    if playlist.showOpenFolderPanel() > 0 {
-                        restoreProgressOrDefault()
-                    }
-                }.buttonStyle(.bordered)
+                Button("打开文件夹") { openFolder() }.buttonStyle(.bordered)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -411,29 +406,56 @@ struct MainWindowView: View {
     // MARK: - Actions
 
     private func loadHistory(_ entry: HistoryEntry) {
-        // 切换前：停止当前播放、清空列表
-        if player.isPlaying || player.currentTrack != nil {
-            player.stop()
+        if entry.isFolder {
+            switchToFolder(entry.url)
+        } else {
+            // 单文件历史：清空后追加
+            saveCurrentProgress()
+            if player.currentTrack != nil { player.stop() }
+            playlist.clearAll()
+            _ = playlist.addFile(entry.url)
+            HistoryManager.shared.record(url: entry.url, isFolder: false)
+            if let first = playlist.tracks.first {
+                playlist.currentIndex = 0
+                player.loadAndPause(track: first, at: 0)
+            }
         }
+    }
+
+    /// 选择并切换到指定文件夹
+    private func openFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.message = "选择包含听力音频的文件夹"
+        guard panel.runModal() == .OK, let url = panel.urls.first else { return }
+        switchToFolder(url)
+    }
+
+    /// 切换到一个文件夹的统一入口（清空旧列表 → 加载新文件夹 → 恢复或定位进度）
+    private func switchToFolder(_ url: URL) {
+        // 切换前先把当前文件夹的进度落盘
+        saveCurrentProgress()
+        if player.currentTrack != nil { player.stop() }
         playlist.clearAll()
 
-        // 加载新内容
-        if entry.isFolder {
-            _ = playlist.addFolder(entry.url)
-        } else {
-            _ = playlist.addFile(entry.url)
-        }
+        let count = playlist.addFolder(url)
+        guard count > 0 else { return }
+        HistoryManager.shared.record(url: url, isFolder: true)
 
-        // 把这条记录推到历史最前面
-        HistoryManager.shared.record(url: entry.url, isFolder: entry.isFolder)
-
-        // 恢复上次播放进度（暂停状态），没记录则定位到第一首 0:00
         restoreProgressOrDefault()
     }
 
     /// 加载完一个文件夹后调用：有进度记录就恢复，没有就定位到第一首 0:00（都是暂停状态）
     private func restoreProgressOrDefault() {
         guard !playlist.tracks.isEmpty else { return }
+
+        // 先恢复偏好（速度 + 模式）
+        let prefs = playlist.loadPrefs(folder: playlist.currentFolder)
+        player.setRate(prefs.rate)
+        player.playMode = prefs.mode
+
         if let saved = playlist.loadProgress(folder: playlist.currentFolder),
            let idx = playlist.tracks.firstIndex(where: { $0.id == saved.track.id }) {
             playlist.currentIndex = idx
@@ -444,11 +466,15 @@ struct MainWindowView: View {
         }
     }
 
-    /// 保存当前文件夹的播放进度
+    /// 保存当前文件夹的播放进度 + 偏好（速度 / 模式）
     private func saveCurrentProgress() {
-        guard let folder = playlist.currentFolder,
-              let track = player.currentTrack else { return }
-        playlist.saveProgress(folder: folder, trackURL: track.url, time: player.currentTime)
+        guard let folder = playlist.currentFolder else { return }
+        // 偏好独立保存（即使没在播放也保存，比如刚改了速度就切走）
+        playlist.savePrefs(folder: folder, rate: player.playbackRate, mode: player.playMode)
+        // 进度只有在有曲目时才保存
+        if let track = player.currentTrack {
+            playlist.saveProgress(folder: folder, trackURL: track.url, time: player.currentTime)
+        }
     }
 
     private func playTrack(_ track: TrackItem) {

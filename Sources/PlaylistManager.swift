@@ -24,9 +24,11 @@ final class PlaylistManager: ObservableObject {
     static let supportedExtensions: Set<String> = ["mp3", "m4a", "wav", "aac", "flac", "aiff", "aif", "ogg", "wma"]
 
     private let tracksKey = "playlist.tracks"
+    private let folderKey = "playlist.currentFolder"
     private let restoreKey = "playlist.autoRestore"
     private let sortPrefix = "playlist.sort."        // + folder path
     private let progressPrefix = "playlist.progress." // + folder path
+    private let prefsPrefix = "playlist.prefs."     // + folder path → {rate, mode}
 
     var autoRestore: Bool {
         get { UserDefaults.standard.object(forKey: restoreKey) as? Bool ?? false }
@@ -74,6 +76,28 @@ final class PlaylistManager: ObservableObject {
         return (track, time)
     }
 
+    // MARK: - Per-Folder Preferences (rate / play mode)
+
+    /// 保存某文件夹的播放偏好（速度 + 模式）
+    func savePrefs(folder: URL?, rate: Float, mode: PlayMode) {
+        guard let folder else { return }
+        let key = prefsPrefix + folder.path
+        UserDefaults.standard.set([
+            "rate": rate,
+            "mode": mode.rawValue
+        ], forKey: key)
+    }
+
+    /// 读取某文件夹的播放偏好（默认 1.0x + 顺序播放）
+    func loadPrefs(folder: URL?) -> (rate: Float, mode: PlayMode) {
+        guard let folder,
+              let dict = UserDefaults.standard.dictionary(forKey: prefsPrefix + folder.path)
+        else { return (1.0, .sequential) }
+        let rate = (dict["rate"] as? Double).map { Float($0) } ?? 1.0
+        let mode = (dict["mode"] as? String).flatMap { PlayMode(rawValue: $0) } ?? .sequential
+        return (rate, mode)
+    }
+
     var currentTrack: TrackItem? {
         guard let idx = currentIndex, tracks.indices.contains(idx) else { return nil }
         return tracks[idx]
@@ -94,6 +118,12 @@ final class PlaylistManager: ObservableObject {
     func saveTracks() {
         guard let data = try? JSONEncoder().encode(tracks) else { return }
         UserDefaults.standard.set(data, forKey: tracksKey)
+        // 同步保存当前文件夹
+        if let folder = currentFolder {
+            UserDefaults.standard.set(folder.path, forKey: folderKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: folderKey)
+        }
     }
 
     func loadSavedTracks() {
@@ -103,6 +133,11 @@ final class PlaylistManager: ObservableObject {
         else { return }
         // 过滤掉文件已不存在的条目
         tracks = decoded.filter { FileManager.default.fileExists(atPath: $0.url.path) }
+        // 恢复 currentFolder
+        if let path = UserDefaults.standard.string(forKey: folderKey) {
+            currentFolder = URL(fileURLWithPath: path)
+            currentSortOrder = savedSortOrder(for: currentFolder)
+        }
     }
 
     // MARK: - Track Operations
