@@ -11,6 +11,9 @@ struct MainWindowView: View {
     @State private var showSettings = false
     @State private var playlistWidth: CGFloat = 350
 
+    // 每 3 秒触发一次进度保存
+    private let saveTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
+
     var body: some View {
         GeometryReader { geometry in
             HStack(spacing: 0) {
@@ -38,6 +41,17 @@ struct MainWindowView: View {
         .onAppear {
             setupTrackFinishedCallback()
             playlist.loadSavedTracks()
+            // 应用退出前保存进度
+            NotificationCenter.default.addObserver(
+                forName: NSApplication.willTerminateNotification,
+                object: nil, queue: .main
+            ) { _ in
+                Task { @MainActor in saveCurrentProgress() }
+            }
+        }
+        // 定时保存当前进度（仅在有曲目加载时）
+        .onReceive(saveTimer) { _ in
+            if player.currentTrack != nil { saveCurrentProgress() }
         }
     }
 
@@ -72,7 +86,12 @@ struct MainWindowView: View {
                 }
                 .help("添加文件")
 
-                Button(action: { _ = playlist.showOpenFolderPanel() }) {
+                Button(action: {
+                    let wasEmpty = playlist.tracks.isEmpty
+                    if playlist.showOpenFolderPanel() > 0 && wasEmpty {
+                        restoreProgressOrDefault()
+                    }
+                }) {
                     Image(systemName: "folder.badge.plus")
                 }
                 .help("添加文件夹")
@@ -167,7 +186,11 @@ struct MainWindowView: View {
             Text("点击按钮或拖拽文件添加").font(.caption).foregroundColor(.secondary)
             HStack(spacing: 12) {
                 Button("添加文件") { playlist.showOpenFilePanel() }.buttonStyle(.borderedProminent)
-                Button("添加文件夹") { _ = playlist.showOpenFolderPanel() }.buttonStyle(.bordered)
+                Button("添加文件夹") {
+                    if playlist.showOpenFolderPanel() > 0 {
+                        restoreProgressOrDefault()
+                    }
+                }.buttonStyle(.bordered)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -394,7 +417,7 @@ struct MainWindowView: View {
         }
         playlist.clearAll()
 
-        // 加载新内容（不自动播放）
+        // 加载新内容
         if entry.isFolder {
             _ = playlist.addFolder(entry.url)
         } else {
@@ -403,6 +426,29 @@ struct MainWindowView: View {
 
         // 把这条记录推到历史最前面
         HistoryManager.shared.record(url: entry.url, isFolder: entry.isFolder)
+
+        // 恢复上次播放进度（暂停状态），没记录则定位到第一首 0:00
+        restoreProgressOrDefault()
+    }
+
+    /// 加载完一个文件夹后调用：有进度记录就恢复，没有就定位到第一首 0:00（都是暂停状态）
+    private func restoreProgressOrDefault() {
+        guard !playlist.tracks.isEmpty else { return }
+        if let saved = playlist.loadProgress(folder: playlist.currentFolder),
+           let idx = playlist.tracks.firstIndex(where: { $0.id == saved.track.id }) {
+            playlist.currentIndex = idx
+            player.loadAndPause(track: saved.track, at: saved.time)
+        } else if let first = playlist.tracks.first {
+            playlist.currentIndex = 0
+            player.loadAndPause(track: first, at: 0)
+        }
+    }
+
+    /// 保存当前文件夹的播放进度
+    private func saveCurrentProgress() {
+        guard let folder = playlist.currentFolder,
+              let track = player.currentTrack else { return }
+        playlist.saveProgress(folder: folder, trackURL: track.url, time: player.currentTime)
     }
 
     private func playTrack(_ track: TrackItem) {
@@ -451,11 +497,18 @@ struct MainWindowView: View {
                 guard let data = item as? Data,
                       let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
                 Task { @MainActor in
+                    let wasEmpty = playlist.tracks.isEmpty
                     if url.hasDirectoryPath {
                         let count = playlist.addFolder(url)
-                        if count > 0 { HistoryManager.shared.record(url: url, isFolder: true) }
+                        if count > 0 {
+                            HistoryManager.shared.record(url: url, isFolder: true)
+                            if wasEmpty { restoreProgressOrDefault() }
+                        }
                     } else {
-                        if playlist.addFile(url) { HistoryManager.shared.record(url: url, isFolder: false) }
+                        if playlist.addFile(url) {
+                            HistoryManager.shared.record(url: url, isFolder: false)
+                            if wasEmpty { restoreProgressOrDefault() }
+                        }
                     }
                 }
             }

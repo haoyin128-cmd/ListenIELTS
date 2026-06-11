@@ -25,7 +25,8 @@ final class PlaylistManager: ObservableObject {
 
     private let tracksKey = "playlist.tracks"
     private let restoreKey = "playlist.autoRestore"
-    private let sortPrefix = "playlist.sort."   // + folder path
+    private let sortPrefix = "playlist.sort."        // + folder path
+    private let progressPrefix = "playlist.progress." // + folder path
 
     var autoRestore: Bool {
         get { UserDefaults.standard.object(forKey: restoreKey) as? Bool ?? false }
@@ -47,6 +48,30 @@ final class PlaylistManager: ObservableObject {
     private func saveSortOrder(_ order: SortOrder, for folder: URL?) {
         guard let folder else { return }
         UserDefaults.standard.set(order.rawValue, forKey: sortPrefix + folder.path)
+    }
+
+    // MARK: - Per-Folder Progress Memory
+
+    /// 保存某文件夹的播放进度（曲目路径 + 秒数）
+    func saveProgress(folder: URL?, trackURL: URL, time: TimeInterval) {
+        guard let folder else { return }
+        let key = progressPrefix + folder.path
+        UserDefaults.standard.set([
+            "track": trackURL.path,
+            "time": time
+        ], forKey: key)
+    }
+
+    /// 读取某文件夹上次的播放进度
+    func loadProgress(folder: URL?) -> (track: TrackItem, time: TimeInterval)? {
+        guard let folder else { return nil }
+        let key = progressPrefix + folder.path
+        guard let dict = UserDefaults.standard.dictionary(forKey: key),
+              let trackPath = dict["track"] as? String,
+              let time = dict["time"] as? TimeInterval,
+              let track = tracks.first(where: { $0.url.path == trackPath })
+        else { return nil }
+        return (track, time)
     }
 
     var currentTrack: TrackItem? {

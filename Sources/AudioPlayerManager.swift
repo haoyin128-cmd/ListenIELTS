@@ -39,16 +39,26 @@ final class AudioPlayerManager: ObservableObject {
     // MARK: - Playback Control
     
     func loadAndPlay(track: TrackItem) {
+        load(track: track, autoPlay: true, startTime: 0)
+    }
+
+    /// 仅加载并定位到指定时间，不自动播放（用于恢复进度）
+    func loadAndPause(track: TrackItem, at startTime: TimeInterval) {
+        load(track: track, autoPlay: false, startTime: startTime)
+    }
+
+    private func load(track: TrackItem, autoPlay: Bool, startTime: TimeInterval) {
         stop()
-        
+
         let asset = AVURLAsset(url: track.url)
         let playerItem = AVPlayerItem(asset: asset)
-        
+
         let newPlayer = AVPlayer(playerItem: playerItem)
         self.player = newPlayer
         self.currentTrack = track
         self.isLoading = true
-        
+        self.currentTime = startTime  // 提前更新 UI，避免闪到 0
+
         // 监听时长
         Task { [weak self] in
             guard let self else { return }
@@ -62,18 +72,25 @@ final class AudioPlayerManager: ObservableObject {
                 await MainActor.run { self.duration = 0 }
             }
         }
-        
+
         // 监听播放状态
         statusObserver = playerItem.observe(\.status, options: [.new]) { [weak self] item, _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.isLoading = false
                 if item.status == .readyToPlay {
-                    self.play(at: self.playbackRate)
+                    // 先 seek 再决定是否播放
+                    if startTime > 0 {
+                        let cm = CMTime(seconds: startTime, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+                        self.player?.seek(to: cm, toleranceBefore: .zero, toleranceAfter: .zero)
+                    }
+                    if autoPlay {
+                        self.play(at: self.playbackRate)
+                    }
                 }
             }
         }
-        
+
         // 监听实际播放速率
         rateObserver = newPlayer.observe(\.rate, options: [.new]) { [weak self] _, change in
             Task { @MainActor [weak self] in
@@ -81,7 +98,7 @@ final class AudioPlayerManager: ObservableObject {
                 self.isPlaying = rate > 0
             }
         }
-        
+
         // 时间观察器（兼顾 AB 循环检测）
         let scale = CMTimeScale(NSEC_PER_SEC)
         timeObserver = newPlayer.addPeriodicTimeObserver(
@@ -99,7 +116,7 @@ final class AudioPlayerManager: ObservableObject {
                 }
             }
         }
-        
+
         // 曲目结束通知
         itemEndObserver = NotificationCenter.default.addObserver(
             forName: .AVPlayerItemDidPlayToEndTime,
